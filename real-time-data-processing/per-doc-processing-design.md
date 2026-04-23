@@ -141,27 +141,35 @@ Timing distribution:
 
 ### Comparison: Per-Document vs Batch (10 docs)
 
+From the notebook's side-by-side comparison cell:
+
 | Metric | Per-Document | Batch |
 |---|---|---|
+| Documents | 10 | 10 |
 | Total wall clock | 119.6s | 237.2s |
-| Processing time (excl. setup) | ~119.6s | 96.46s |
-| Throughput (docs/sec) | 0.08 | 0.10 |
+| Throughput (total wall clock) | 0.08 docs/sec | 0.04 docs/sec |
+| Ray Data execution time | N/A | 96.46s |
+| Throughput (execution only) | N/A | 0.10 docs/sec |
 | Avg per-doc latency | 64.7s | N/A (batch) |
+| First-doc latency | ~20.9s | ~237s (entire batch) |
 | Concurrency model | 2 concurrent jobs (queued) | 1 actor, sequential |
 | Setup overhead | ~5s (pip cached after first job) | ~140s (pip + Ray Data init) |
 | Docling init | Every job (cold start) | Once per actor (warm) |
+| Per-doc overhead vs batch | ~41.0s | — |
+
+**Result: Batch is 0.5x slower than per-document** (wall clock).
 
 **Analysis:**
 
-1. **Per-document wins on wall clock** (119.6s vs 237.2s) because it avoids the heavy Ray Data setup overhead. However, batch's *actual processing time* (96.46s) is faster than per-document's wall clock.
+1. **Per-document wins on total wall clock** (119.6s vs 237.2s) — 2x faster end-to-end. The batch approach pays a heavy ~140s setup overhead (pip install + Ray Data initialization) that dominates at small scale.
 
-2. **Batch has higher throughput** (0.10 vs 0.08 docs/sec) when measuring pure processing — warm actors avoid repeated Docling initialization.
+2. **Batch has better pure processing throughput** (0.10 vs 0.08 docs/sec when measuring Ray Data execution only) — warm actors avoid repeated Docling initialization, saving ~41s of overhead per document.
 
-3. **Per-document has lower first-document latency** — the first document completes in ~20.9s. In batch mode, no document is available until the entire pipeline finishes (~237s including setup).
+3. **Per-document has much lower first-document latency** — the first document completes in ~20.9s. In batch mode, no document is available until the entire pipeline finishes (~237s).
 
-4. **Per-document is better for real-time use cases** where individual document latency matters. Batch is better for bulk ingestion where total throughput matters.
+4. **Per-document is the clear winner for real-time use cases** where individual document latency matters. Batch is better for bulk ingestion at larger scale where the setup cost is amortized.
 
-5. **The setup overhead gap will shrink at scale** — at 100+ documents, the ~140s batch setup is amortized across more files, and warm actors become a bigger advantage.
+5. **The crossover point** — at larger document counts (50+), the batch setup overhead becomes negligible per document, and the ~41s per-doc overhead (cold Docling init) accumulates. Option C (Ray Data streaming with warm actors) could combine the best of both.
 
 ### Issue: Head Pod Autoscaler CrashLoopBackOff (2026-04-23)
 
