@@ -115,9 +115,53 @@ Timing distribution:
 - Later-submitted jobs include queuing time in their duration (submitted at t=0-5s, but may not start until an earlier job finishes)
 - 0.08 docs/sec throughput is low — batch comparison needed to quantify overhead
 
-### Test 2: Batch Baseline — 10 docs
+### Test 2: Batch Baseline — 10 docs (2026-04-23)
 
-*Pending — blocked by autoscaler issue (see below)*
+- Cluster: 2 workers, 4 CPUs each (2 schedulable), 8GB each
+- Head: 2 schedulable CPUs (patched from 0 after autoscaler fix)
+- `entrypoint_num_cpus=2`, ActorPoolStrategy min=1/max=2, batch_size=4
+
+| Metric | Value |
+|---|---|
+| Documents | 10 |
+| Succeeded | 10 |
+| Failed | 0 |
+| Total wall clock | 237.2s |
+| Ray Data execution | 96.46s |
+| Throughput (files/sec) | 0.10 |
+| Throughput (pages/sec) | 0.33 |
+| Total pages | 32 |
+| Actors used | 1 (all files on worker-92nnc) |
+
+**Observations:**
+- Total wall clock (237.2s) includes ~140s of pip install and Ray Data setup overhead
+- Actual Ray Data execution time (96.46s) is the meaningful comparison point
+- Only 1 actor was used despite `max_actors=2` — Ray Data likely decided 1 was sufficient for 10 files with the available resources
+- All files processed on a single worker (no distribution across nodes)
+
+### Comparison: Per-Document vs Batch (10 docs)
+
+| Metric | Per-Document | Batch |
+|---|---|---|
+| Total wall clock | 119.6s | 237.2s |
+| Processing time (excl. setup) | ~119.6s | 96.46s |
+| Throughput (docs/sec) | 0.08 | 0.10 |
+| Avg per-doc latency | 64.7s | N/A (batch) |
+| Concurrency model | 2 concurrent jobs (queued) | 1 actor, sequential |
+| Setup overhead | ~5s (pip cached after first job) | ~140s (pip + Ray Data init) |
+| Docling init | Every job (cold start) | Once per actor (warm) |
+
+**Analysis:**
+
+1. **Per-document wins on wall clock** (119.6s vs 237.2s) because it avoids the heavy Ray Data setup overhead. However, batch's *actual processing time* (96.46s) is faster than per-document's wall clock.
+
+2. **Batch has higher throughput** (0.10 vs 0.08 docs/sec) when measuring pure processing — warm actors avoid repeated Docling initialization.
+
+3. **Per-document has lower first-document latency** — the first document completes in ~20.9s. In batch mode, no document is available until the entire pipeline finishes (~237s including setup).
+
+4. **Per-document is better for real-time use cases** where individual document latency matters. Batch is better for bulk ingestion where total throughput matters.
+
+5. **The setup overhead gap will shrink at scale** — at 100+ documents, the ~140s batch setup is amortized across more files, and warm actors become a bigger advantage.
 
 ### Issue: Head Pod Autoscaler CrashLoopBackOff (2026-04-23)
 
