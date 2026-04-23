@@ -30,6 +30,29 @@ Persistent RayCluster (already running)
 5. Ray handles queuing, scheduling, and distribution across workers
 6. The notebook waits for all jobs to complete and prints a performance report
 
+## Cluster Configuration
+
+The correct RayCluster configuration for both per-document and batch processing:
+
+| Setting | Value | Reason |
+|---|---|---|
+| `enableInTreeAutoscaling` | `false` | SDK default. Setting to `true` causes autoscaler sidecar CrashLoopBackOff on fixed-size clusters |
+| Head `num-cpus` | `2` | Allows job driver to schedule on head. `0` blocks Ray Data with "No available node types" error |
+| Worker `num-cpus` | `WORKER_CPUS - 2` (e.g. `2`) | Reserves 2 CPUs per worker for Ray system processes (raylet, object store) |
+
+The CodeFlare SDK does not support setting `num-cpus` in `rayStartParams`, so a JSON patch is applied after `cluster.apply()`. See `issues_to_report.md` for details.
+
+```python
+patch = [
+    {
+        "op": "add",
+        "path": "/spec/workerGroupSpecs/0/rayStartParams/num-cpus",
+        "value": str(WORKER_CPUS - 2),
+    },
+    {"op": "add", "path": "/spec/headGroupSpec/rayStartParams/num-cpus", "value": "2"},
+]
+```
+
 ## Comparison with Batch Processing
 
 | Aspect | Batch | Per-Document |

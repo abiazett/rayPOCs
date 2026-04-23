@@ -58,12 +58,16 @@ def _converter_worker(req_q, res_q, cpus, output_base_str, write_json):
 
     import io
 
+    t_import_start = time.time()
+
     from docling.datamodel.base_models import DocumentStream, InputFormat
     from docling.datamodel.pipeline_options import (
         AcceleratorOptions,
         PdfPipelineOptions,
     )
     from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    t_import_done = time.time()
 
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = False
@@ -78,6 +82,8 @@ def _converter_worker(req_q, res_q, cpus, output_base_str, write_json):
         }
     )
 
+    t_init_done = time.time()
+
     output_base = Path(output_base_str)
     markdown_dir = output_base / "markdown"
     json_dir = output_base / "json" if write_json else None
@@ -85,8 +91,11 @@ def _converter_worker(req_q, res_q, cpus, output_base_str, write_json):
     if write_json:
         import orjson
 
-    # Signal parent that initialisation is complete
-    res_q.put(("ready",))
+    import_duration = round(t_import_done - t_import_start, 3)
+    init_duration = round(t_init_done - t_import_done, 3)
+
+    # Signal parent that initialisation is complete, with timing
+    res_q.put(("ready", import_duration, init_duration))
 
     # Process the single file
     msg = req_q.get()
@@ -106,9 +115,12 @@ def _converter_worker(req_q, res_q, cpus, output_base_str, write_json):
         fname = os.path.basename(file_path)
         fname_base = fname.rsplit(".", 1)[0]
 
+        t_convert_start = time.time()
         stream = DocumentStream(name=fname, stream=io.BytesIO(file_bytes))
         result = converter.convert(stream)
         doc = result.document
+        t_convert_done = time.time()
+        convert_duration = round(t_convert_done - t_convert_start, 3)
 
         pages = getattr(doc, "pages", None)
         page_count = len(pages) if pages is not None else 0
@@ -123,10 +135,11 @@ def _converter_worker(req_q, res_q, cpus, output_base_str, write_json):
             js_kb = round(len(json_bytes) / 1024, 2)
             _write(json_dir / f"{fname_base}.json", json_bytes)
 
-        res_q.put(("success", page_count, file_size, md_kb, js_kb, ""))
+        res_q.put(("success", page_count, file_size, md_kb, js_kb, "",
+                    convert_duration))
 
     except Exception as e:
-        res_q.put(("error", 0, 0, 0.0, 0.0, str(e)[:150]))
+        res_q.put(("error", 0, 0, 0.0, 0.0, str(e)[:150], 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +149,8 @@ def _converter_worker(req_q, res_q, cpus, output_base_str, write_json):
 
 def process_single_document():
     """Process a single PDF using subprocess isolation."""
+    job_start = time.time()
+
     if not FILE_PATH:
         raise ValueError("FILE_PATH environment variable is required")
 
@@ -156,6 +171,7 @@ def process_single_document():
     print(f"  Timeout: {FILE_TIMEOUT}s")
 
     # Start converter subprocess
+    t_subprocess_start = time.time()
     req_q = mp.Queue()
     res_q = mp.Queue()
     worker = mp.Process(
@@ -169,9 +185,14 @@ def process_single_document():
     try:
         msg = res_q.get(timeout=300)
         assert msg[0] == "ready"
+        import_duration = msg[1]
+        init_duration = msg[2]
     except (queue.Empty, AssertionError):
         worker.kill()
         raise RuntimeError("Converter subprocess failed to initialise")
+
+    t_ready = time.time()
+    subprocess_startup = round(t_ready - t_subprocess_start, 3)
 
     # Send the file for processing
     t0 = time.time()
@@ -179,20 +200,27 @@ def process_single_document():
 
     try:
         result = res_q.get(timeout=FILE_TIMEOUT)
-        status, page_count, file_size, md_kb, js_kb, error_msg = result
+        status, page_count, file_size, md_kb, js_kb, error_msg, convert_duration = result
         duration = round(time.time() - t0, 3)
+        total_job_time = round(time.time() - job_start, 3)
 
         if status == "success":
             file_size_mb = round(file_size / (1024 * 1024), 3)
-            pps = round(page_count / duration, 2) if duration > 0 else 0.0
+            pps = round(page_count / convert_duration, 2) if convert_duration > 0 else 0.0
             print(f"\n  Status:    SUCCESS")
             print(f"  Pages:     {page_count}")
             print(f"  File size: {file_size_mb} MB")
-            print(f"  Duration:  {duration}s")
-            print(f"  Pages/sec: {pps}")
             print(f"  Output MD: {md_kb} KB")
             if WRITE_JSON:
                 print(f"  Output JSON: {js_kb} KB")
+            print(f"\n  --- Timing Breakdown ---")
+            print(f"  Docling import:     {import_duration}s")
+            print(f"  Converter init:     {init_duration}s")
+            print(f"  Subprocess startup: {subprocess_startup}s (import + init + overhead)")
+            print(f"  Conversion:         {convert_duration}s")
+            print(f"  Total job time:     {total_job_time}s")
+            print(f"  Overhead:           {round(total_job_time - convert_duration, 3)}s")
+            print(f"  Pages/sec:          {pps}")
         else:
             print(f"\n  Status: ERROR")
             print(f"  Error:  {error_msg}")
@@ -214,7 +242,7 @@ def process_single_document():
         worker.kill()
         worker.join()
 
-    print(f"\nDone: {fname} in {duration}s")
+    print(f"\nDone: {fname} in {total_job_time}s")
 
 
 if __name__ == "__main__":
