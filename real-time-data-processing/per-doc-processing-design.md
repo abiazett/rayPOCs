@@ -226,6 +226,46 @@ Workers         — Running (2/2)
 | `ray-cluster-docling-batch-processing.ipynb` | Original batch notebook (for comparison) |
 | `ray_data_process.py` | Original batch processor (for comparison) |
 
-## Future: Option C — Ray Data Streaming
+## Future Options
 
-If per-job overhead is too high, the next approach to test is a persistent Ray Data pipeline that watches for new documents and processes them as they arrive. This would keep actors warm (no repeated Docling init) while still processing documents individually as they land. This combines the low-latency of the per-doc pattern with the efficiency of warm actors from the batch pattern.
+### Option B — Ray Data with `batch_size=1`
+
+Instead of submitting separate RayJobs, submit a **single RayJob** that uses Ray Data with `ActorPoolStrategy` and `batch_size=1`. Each actor processes one file at a time, but the actors stay warm across files — avoiding the repeated Docling initialization that dominates per-job overhead in Option A.
+
+```python
+ds = ray.data.from_pandas(pd.DataFrame({"path": [single_pdf_path]}))
+ds.map_batches(
+    DoclingProcessor,
+    compute=ray.data.ActorPoolStrategy(min_size=1, max_size=2),
+    batch_size=1,
+    num_cpus=CPUS_PER_ACTOR,
+)
+```
+
+**Pros:**
+- Warm actors — Docling `DocumentConverter` loads models once per actor, not once per document
+- Uses Ray Data's built-in scheduling, fault tolerance, and actor pool management
+- Can process a single document or a small batch with the same code path
+
+**Cons:**
+- Still incurs Ray Data setup overhead (~140s observed in batch test) on every job submission, which may negate the warm-actor benefit for single documents
+- Ray Data is designed for dataset-scale operations — using it for one file at a time may be over-engineering
+- No advantage over Option A if `runtime_env` pip install and Ray Data init dominate the overhead
+
+**When to consider:** If the 50-doc test shows that Docling init (not pip/Ray Data setup) is the dominant overhead per job in Option A, Option B could help by keeping actors warm. But if the setup overhead is the bottleneck, Option C is the better path.
+
+### Option C — Ray Data Streaming
+
+A persistent Ray Data pipeline that stays running and watches for new documents, processing them as they arrive. This keeps actors warm (no repeated Docling init) **and** avoids repeated Ray Data setup overhead — the pipeline initializes once and stays up.
+
+**Pros:**
+- Warm actors + zero per-document setup overhead — the best of both worlds
+- Low latency for individual documents (no job submission overhead)
+- Natural fit for a real-time processing service
+
+**Cons:**
+- More complex to implement — needs a document arrival mechanism (file watcher, queue, API)
+- Cluster resources are held even when idle
+- Error handling and recovery are more complex in a long-running pipeline
+
+**When to consider:** If both Docling init and Ray Data setup are significant overhead in Options A/B, making neither viable for low-latency real-time processing.
