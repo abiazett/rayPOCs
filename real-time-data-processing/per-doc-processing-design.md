@@ -117,7 +117,30 @@ Timing distribution:
 
 ### Test 2: Batch Baseline — 10 docs
 
-*Pending — run Step 7b in the notebook*
+*Pending — blocked by autoscaler issue (see below)*
+
+### Issue: Head Pod Autoscaler CrashLoopBackOff (2026-04-23)
+
+During the batch baseline test, the job appeared stuck. Investigation revealed the head pod's **autoscaler container** was in `CrashLoopBackOff` with 1401 restarts, while the `ray-head` and worker containers were healthy.
+
+```
+ray-docling-processor-head-nhmmx:
+  autoscaler    — CrashLoopBackOff (1401 restarts)
+  ray-head      — Running
+  kube-rbac-proxy — Running
+Workers         — Running (2/2)
+```
+
+**Impact:**
+- Per-document jobs (10/10) succeeded despite the autoscaler crash — they use the Ray Job Client and don't depend on autoscaling
+- The batch baseline job (Ray Data + ActorPoolStrategy) appeared stuck, likely because Ray Data's scheduling interacts with the autoscaler for resource management
+
+**Root cause:** Not yet investigated. The autoscaler was enabled via the `enableInTreeAutoscaling: true` patch applied during cluster creation. With a fixed 2-worker cluster, autoscaling is not needed.
+
+**Follow-up:**
+- Investigate autoscaler crash logs (`oc logs <head-pod> -c autoscaler`)
+- Consider disabling autoscaling for fixed-size clusters
+- Recreate the cluster to get a clean batch baseline comparison
 
 ## Files
 
