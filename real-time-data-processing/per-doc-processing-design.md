@@ -85,6 +85,40 @@ With 2 workers × 2 schedulable CPUs each and `entrypoint_num_cpus=2`, Ray runs 
 3. What is the per-document latency (submit to result)?
 4. Does the `runtime_env` pip cache work across jobs (first job slow, subsequent faster)?
 
+## Test Results
+
+### Test 1: Per-Document — 10 docs (2026-04-23)
+
+- Cluster: 2 workers, 4 CPUs each (2 schedulable), 8GB each
+- `entrypoint_num_cpus=2`, `SUBMIT_DELAY=0.5s`
+
+| Metric | Value |
+|---|---|
+| Documents | 10 |
+| Succeeded | 10 |
+| Failed | 0 |
+| Submit phase | 5.4s |
+| Total wall clock | 119.6s |
+| Throughput | 0.08 docs/sec |
+| Per-job min | 20.9s |
+| Per-job max | 114.1s |
+| Per-job avg | 64.7s |
+| Per-job median | 78.9s |
+
+Timing distribution:
+- <30s: 1
+- 30-60s: 3
+- 60-120s: 6
+
+**Observations:**
+- Large variance (20.9s to 114.1s) likely due to different PDF sizes/complexity
+- Later-submitted jobs include queuing time in their duration (submitted at t=0-5s, but may not start until an earlier job finishes)
+- 0.08 docs/sec throughput is low — batch comparison needed to quantify overhead
+
+### Test 2: Batch Baseline — 10 docs
+
+*Pending — run Step 7b in the notebook*
+
 ## Files
 
 | File | Purpose |
