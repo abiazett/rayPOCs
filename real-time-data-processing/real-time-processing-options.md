@@ -109,6 +109,7 @@ On OpenShift, this deploys via the KubeRay `RayService` CRD (instead of `RayJob`
 - Production-ready — designed for exactly this use case (on-demand processing with warm models)
 
 **Cons:**
+- **RHOAI does not officially support or test Ray Serve.** The `RayService` CRD and Serve runtime have not been validated on the product, so adopting this approach may require extended effort to mature it (testing, support gaps, potential KubeRay/ODH integration issues). This is a significant adoption risk.
 - Requires a running `RayService` instead of submitting `RayJob` CRDs — different operational model
 - Cluster resources are held while the service is up (same as Option C)
 - Subprocess isolation for timeout protection needs adaptation for the async Serve handler
