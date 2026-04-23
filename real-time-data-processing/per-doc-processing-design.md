@@ -52,17 +52,36 @@ Each per-document job incurs overhead that doesn't exist in the batch approach:
 
 The test will quantify this overhead by measuring total per-job duration (submit to completion) versus the actual Docling conversion time logged by the script.
 
+## Critical: `entrypoint_num_cpus`
+
+**Finding from first test (2026-04-23):** Submitting 50 jobs without resource limits caused all 50 to launch simultaneously, OOM-killing both workers.
+
+By default, `client.submit_job()` sets `entrypoint_num_cpus=0`, meaning Ray places **no CPU constraint** on the job driver process. Every submitted job starts immediately regardless of available resources.
+
+**Fix:** Set `entrypoint_num_cpus=CPUS_PER_ACTOR` (e.g. 2) in the `submit_job()` call. This makes Ray treat each job like a task that requires N CPUs. When the cluster runs out of CPUs, excess jobs are queued in `PENDING` state until a running job finishes and releases its CPUs.
+
+```python
+client.submit_job(
+    entrypoint="python ray_single_doc_process.py",
+    entrypoint_num_cpus=CPUS_PER_ACTOR,  # Ray queues jobs until CPUs are free
+    runtime_env={...},
+)
+```
+
+With 2 workers × 2 schedulable CPUs each and `entrypoint_num_cpus=2`, Ray runs ~2 jobs concurrently and queues the rest. This is the mechanism that prevents resource exhaustion and is essential for the per-document pattern.
+
 ## Test Plan
 
-**First test: 50 documents, fire-and-forget**
-- Submit all 50 jobs with 0.5s delay between submissions
-- Let Ray handle scheduling and queuing
+**First test: 10 documents, fire-and-forget**
+- Submit all 10 jobs with 0.5s delay between submissions
+- `entrypoint_num_cpus=2` to let Ray manage concurrency
 - Cluster: 2 workers, 4 CPUs each (2 schedulable per worker after Ray overhead)
 - Measure: per-job duration, throughput (docs/sec), timing distribution
+- Scale up to 50+ once the pattern is proven
 
 **Key questions to answer:**
 1. How much overhead does per-job submission add vs batch?
-2. How does Ray queue jobs when the cluster is saturated (50 jobs on 2 workers)?
+2. How does Ray queue jobs when the cluster is saturated?
 3. What is the per-document latency (submit to result)?
 4. Does the `runtime_env` pip cache work across jobs (first job slow, subsequent faster)?
 
