@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Generated data
+*.db
+*.parquet
+local_outputs/
+
+# PDFs (sample data, too large for git)
+pdfs/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

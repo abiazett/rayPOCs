@@ -1,0 +1,9 @@
+ray[data]>=2.44.0
+docling>=2.0.0
+feast[milvus]>=0.41.0
+sentence-transformers>=2.2.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+transformers>=4.30.0
+openai>=1.0.0
+kfp>=2.7.0
