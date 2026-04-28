@@ -18,12 +18,11 @@ overhead. This POC tests alternatives and measures their trade-offs.
 
 | Option | Approach | Status |
 |---|---|---|
-| **A** (current) | One RayJob per document via Job Client | Tested (10 + 50 docs) |
-| **B** | Ray Data with `batch_size=1` (warm actors) | Documented, not yet tested |
-| **C** | Ray Data Streaming (persistent pipeline) | Documented, not yet tested |
-| **D** | Ray Serve (HTTP endpoint with warm replicas) | Recommended by Ray docs, not yet tested |
+| **A** | One RayJob per document via Job Client | Tested (10 + 50 docs) |
+| **B** | `ray.init()` + remote actors (warm actors) | Recommended for POC, not yet tested |
+| **C** | Ray Serve (HTTP endpoint with warm replicas) | Recommended for production, not yet tested |
 
-See `real-time-processing-options.md` for detailed comparison of all four options.
+See `real-time-processing-options.md` for detailed comparison of all three options.
 
 ## Option A Results (Per-Document RayJobs)
 
@@ -36,7 +35,9 @@ See `real-time-processing-options.md` for detailed comparison of all four option
 | First-doc latency | ~20.9s | ~28.5s |
 
 Key finding: each per-document job incurs significant overhead from cold Docling
-initialization. See `per-doc-processing-design.md` for full analysis.
+initialization (~26s overhead on a 1-page doc). Option B (warm actors via
+`ray.init()`) is expected to eliminate this. See `per-doc-processing-design.md`
+for full analysis.
 
 ## Files
 
@@ -46,7 +47,7 @@ initialization. See `per-doc-processing-design.md` for full analysis.
 | `ray_single_doc_process.py` | Per-document processor with subprocess isolation and timing breakdown |
 | `ray_data_process.py` | Batch processor (used for baseline comparison in Step 7b) |
 | `per-doc-processing-design.md` | Option A design, test results, cluster config, findings |
-| `real-time-processing-options.md` | Comparison of all four approaches (A–D) |
+| `real-time-processing-options.md` | Comparison of all three approaches (A–C) |
 | `issues_to_report.md` | Issues found for upstream repos (autoscaler, CodeFlare SDK) |
 
 ## Cluster Configuration

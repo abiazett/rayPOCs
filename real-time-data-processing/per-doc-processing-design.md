@@ -1,6 +1,6 @@
 # Option A: Per-Document Processing with Ray Jobs on a Persistent RayCluster
 
-For comparison with other approaches (Options B–D), see `real-time-processing-options.md`.
+For comparison with other approaches (Options B and C), see `real-time-processing-options.md`.
 
 ## Goal
 
@@ -194,7 +194,39 @@ From the notebook's side-by-side comparison cell:
 
 4. **Per-document is the clear winner for real-time use cases** where individual document latency matters. Batch is better for bulk ingestion at larger scale where the setup cost is amortized.
 
-5. **The crossover point** — at larger document counts (50+), the batch setup overhead becomes negligible per document, and the ~41s per-doc overhead (cold Docling init) accumulates. Option C (Ray Data streaming with warm actors) could combine the best of both.
+5. **The crossover point** — at larger document counts (50+), the batch setup overhead becomes negligible per document, and the ~41s per-doc overhead (cold Docling init) accumulates. Option B (warm actors via `ray.init()`) could combine the best of both.
+
+### Test 3: Per-Document — 50 docs (2026-04-23)
+
+- Cluster: 2 workers, 4 CPUs each (2 schedulable), 8GB each
+- `entrypoint_num_cpus=2`, `SUBMIT_DELAY=0.5s`
+
+| Metric | Value |
+|---|---|
+| Documents | 50 |
+| Succeeded | 50 |
+| Failed | 0 |
+| Total wall clock | 369.7s |
+| Throughput | 0.14 docs/sec |
+| Per-job min | 17.0s |
+| Per-job max | 345.0s |
+| Per-job avg | 200.3s |
+| Per-job median | 207.2s |
+
+Timing distribution:
+- <30s: 2
+- 30-60s: 2
+- 60-120s: 5
+- 120-300s: 33
+- \>300s: 8
+
+**Observations:**
+- All 50 documents succeeded with no failures
+- Throughput improved from 0.08 to 0.14 docs/sec at scale — cluster was more fully utilized
+- Large variance (17.0s to 345.0s) reflects both document complexity and queuing time
+- Most jobs (33/50) fell in the 120-300s bucket, reflecting queuing delays as only ~2 jobs run concurrently
+- First-doc latency ~28.5s (vs ~20.9s for 10-doc test) — slight increase likely due to submission burst
+- Average per-job duration (200.3s) includes significant queuing time for later-submitted jobs
 
 ### Issue: Head Pod Autoscaler CrashLoopBackOff (2026-04-23)
 
@@ -225,11 +257,10 @@ Workers         — Running (2/2)
 |---|---|
 | `ray_single_doc_process.py` | Single-doc processor with subprocess isolation |
 | `ray-cluster-docling-per-doc.ipynb` | Notebook: submit jobs, monitor, report |
-| `ray-cluster-docling-batch-processing.ipynb` | Original batch notebook (for comparison) |
-| `ray_data_process.py` | Original batch processor (for comparison) |
-| `real-time-processing-options.md` | Comparison of all approaches (Options A–D) |
+| `ray_data_process.py` | Batch processor (used for baseline comparison in Step 7b) |
+| `real-time-processing-options.md` | Comparison of all approaches (Options A–C) |
 | `issues_to_report.md` | Issues to report to upstream repos |
 
 ## Other Approaches
 
-For alternative approaches (Options B–D) including Ray Serve, see `real-time-processing-options.md`.
+For alternative approaches (Options B and C), see `real-time-processing-options.md`.

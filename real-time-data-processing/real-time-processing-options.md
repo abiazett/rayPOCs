@@ -1,6 +1,6 @@
 # Real-Time Document Processing: Approach Options
 
-This document compares four approaches for processing PDF documents on-demand using Ray and Docling on a persistent RayCluster.
+This document compares approaches for processing PDF documents on-demand using Ray and Docling on a persistent RayCluster.
 
 See also:
 - `per-doc-processing-design.md` — Option A design, test results, and findings
@@ -8,14 +8,15 @@ See also:
 
 ## Summary
 
-| Option | Approach | Docling Init | Per-Doc Overhead | Ray's Recommendation |
+| Option | Approach | Docling Init | Per-Doc Overhead | Works Today? |
 |---|---|---|---|---|
-| **A** (tested) | One RayJob per document | Every job (cold) | High (job lifecycle) | Batch orchestration |
-| **B** | Ray Data with `batch_size=1` | Once per actor (warm) | High (Ray Data init) | Offline batch inference |
-| **C** | Ray Data Streaming | Once per actor (warm) | Low (pipeline stays up) | Not a real pattern |
-| **D** | Ray Serve | Once per replica (warm) | Minimal (~7-10ms) | **Real-time serving** |
+| **A** (tested) | One RayJob per document | Every job (cold) | High (job lifecycle) | Yes |
+| **B** | `ray.init()` + remote actors | Once per actor (warm) | Low (task scheduling) | Yes |
+| **C** | Ray Serve (HTTP endpoint) | Once per replica (warm) | Minimal (~7-10ms) | Needs `RayService` CRD |
 
-## Option A — Per-Document RayJobs (Current Test)
+**Recommendation:** Option B for POC/development, Option C for production.
+
+## Option A — Per-Document RayJobs (Tested)
 
 Submit one RayJob per document via the Ray Job Submission Client to a persistent RayCluster. Each job runs a standalone Python script that initializes Docling, converts one PDF, and exits.
 
@@ -28,57 +29,71 @@ See `per-doc-processing-design.md` for full design, test results, and findings.
 - `entrypoint_num_cpus` provides built-in concurrency control (Ray queues excess jobs)
 
 **Cons:**
-- Cold Docling init on every job (~41s estimated overhead per document)
+- Cold Docling init on every job — each job spins up a new driver process on the head pod
 - `runtime_env` pip install on every job (cached after first, but still checked)
 - Ray job lifecycle overhead (submission, worker assignment, environment setup)
-- Not what Ray Jobs is designed for — it's a batch orchestration tool
+- Goes through the Dashboard API for each submission, adding unnecessary overhead
+- Ray Jobs are designed for self-contained batch workloads, not request/response
 
-## Option B — Ray Data with `batch_size=1`
+**Test results (50 docs):** 369.7s wall clock, 0.14 docs/sec, avg 200.3s per job. First-doc latency ~28.5s.
 
-Submit a **single RayJob** that uses Ray Data with `ActorPoolStrategy` and `batch_size=1`. Each actor processes one file at a time, but actors stay warm across files — avoiding repeated Docling initialization.
+## Option B — `ray.init()` + Remote Actors (Recommended for POC)
+
+A client (notebook, script, or service) connects **directly** to a long-lived cluster via `ray.init()` and submits work as remote function or actor calls. No job overhead — the connection is direct to the cluster, bypassing the Dashboard API entirely.
 
 ```python
-ds = ray.data.from_pandas(pd.DataFrame({"path": [single_pdf_path]}))
-ds.map_batches(
-    DoclingProcessor,
-    compute=ray.data.ActorPoolStrategy(min_size=1, max_size=2),
-    batch_size=1,
-    num_cpus=CPUS_PER_ACTOR,
-)
+import ray
+
+# Connect directly to the persistent cluster
+ray.init(address="ray://ray-cluster-head-svc:10001")
+
+@ray.remote(num_cpus=2)
+class DoclingProcessor:
+    def __init__(self):
+        from docling.document_converter import DocumentConverter
+        self.converter = DocumentConverter()  # initialized ONCE, stays warm
+
+    def process(self, file_path: str) -> dict:
+        result = self.converter.convert(file_path)
+        doc = result.document
+        return {
+            "markdown": doc.export_to_markdown(),
+            "pages": len(doc.pages) if doc.pages else 0,
+        }
+
+# Create warm actors
+actors = [DoclingProcessor.remote() for _ in range(NUM_ACTORS)]
+
+# Submit documents — Ray task scheduler queues and bin-packs onto workers
+futures = []
+for i, pdf_path in enumerate(pdf_paths):
+    actor = actors[i % len(actors)]
+    futures.append(actor.process.remote(pdf_path))
+
+# Collect results
+results = ray.get(futures)
 ```
 
 **Pros:**
-- Warm actors — Docling `DocumentConverter` loads models once per actor, not once per document
-- Uses Ray Data's built-in scheduling, fault tolerance, and actor pool management
-- Can process a single document or a small batch with the same code path
+- Warm actors — Docling models load once per actor, stay in memory across all requests
+- No job overhead — skips the Dashboard API, no driver process per document
+- Ray's task scheduler properly queues and bin-packs tasks onto workers
+- Works today on a persistent `RayCluster` with no new CRDs or features needed
+- Simple to implement from a notebook or script
+- Natural concurrency control via actor count and `num_cpus`
 
 **Cons:**
-- Still incurs Ray Data setup overhead (~140s observed in batch test) on every job submission, which may negate the warm-actor benefit for single documents
-- Ray Data is designed for dataset-scale operations — using it for one file at a time may be over-engineering
-- No advantage over Option A if `runtime_env` pip install and Ray Data init dominate the overhead
+- Requires a persistent client connection to the cluster (notebook or long-running process)
+- No built-in HTTP endpoint — the client must manage the `ray.init()` connection
+- Fault tolerance is manual — if an actor dies, the client must handle retry/restart
+- Less operational visibility compared to RayJobs (no job status in dashboard)
+- Client must be in the same network as the Ray head (or use Ray Client protocol)
 
-**When to consider:** If the 50-doc test shows that Docling init (not pip/Ray Data setup) is the dominant overhead per job in Option A, Option B could help by keeping actors warm. But if the setup overhead is the bottleneck, Option D is the better path.
+**When to use:** POC and development. This is the fastest path to validating real-time processing with warm actors. It eliminates the per-job overhead entirely and proves whether warm Docling actors solve the latency problem.
 
-## Option C — Ray Data Streaming
+## Option C — Ray Serve (Recommended for Production)
 
-A persistent Ray Data pipeline that stays running and watches for new documents, processing them as they arrive. This keeps actors warm (no repeated Docling init) **and** avoids repeated Ray Data setup overhead — the pipeline initializes once and stays up.
-
-**Pros:**
-- Warm actors + zero per-document setup overhead — the best of both worlds
-- Low latency for individual documents (no job submission overhead)
-- Natural fit for a real-time processing service
-
-**Cons:**
-- More complex to implement — needs a document arrival mechanism (file watcher, queue, API)
-- Cluster resources are held even when idle
-- Error handling and recovery are more complex in a long-running pipeline
-- Ray Data is explicitly documented as being for offline batch inference — streaming is not an officially supported pattern
-
-**When to consider:** If both Docling init and Ray Data setup are significant overhead in Options A/B, making neither viable for low-latency real-time processing. However, Option D (Ray Serve) is the officially supported version of this idea.
-
-## Option D — Ray Serve (Recommended by Ray docs)
-
-Ray Serve is Ray's built-in framework for real-time, on-demand inference and processing. Each Serve **deployment replica** is a persistent Ray actor with a warm model/converter. Documents are submitted via HTTP requests to a persistent endpoint — no job submission, no cold starts.
+Ray Serve is Ray's built-in framework for real-time, on-demand inference and processing. Each Serve **deployment replica** is a persistent Ray actor with a warm model/converter. Documents are submitted via HTTP requests to a persistent endpoint — no job submission, no client connection management.
 
 ```python
 from ray import serve
@@ -98,36 +113,59 @@ class DoclingService:
 app = DoclingService.bind()
 ```
 
-On OpenShift, this deploys via the KubeRay `RayService` CRD (instead of `RayJob`), which manages the Serve application lifecycle on the cluster.
+On OpenShift, this deploys via the KubeRay `RayService` CRD, which manages the Serve application lifecycle on the cluster. The user interaction becomes:
+
+```bash
+curl -X POST https://doc-processor.apps.cluster.example.com/process \
+  --data-binary @my_document.pdf
+```
+
+This could be abstracted into a simple one-liner in the CodeFlare SDK.
 
 **Pros:**
-- Warm replicas — Docling `DocumentConverter` loads models once per replica at startup, stays loaded across all requests. This eliminates the per-document init overhead (~41s in Option A)
+- Warm replicas — Docling `DocumentConverter` loads models once per replica at startup, stays loaded across all requests
 - Minimal per-request overhead — ~7-10ms routing overhead per request, negligible for CPU-intensive PDF conversion
 - Built-in autoscaling — scales replicas based on queue depth, with `max_queued_requests` for load shedding
+- Built-in request queuing — no external queue needed, Ray Serve handles queuing and scaling internally
 - Fault tolerance — replicas auto-restart on failure, with health checks
-- HTTP endpoint — standard request/response interface, easy to integrate with other services
+- HTTP endpoint — standard request/response interface, easy to integrate with any client
 - Production-ready — designed for exactly this use case (on-demand processing with warm models)
+- No persistent client connection needed — any HTTP client can submit documents
 
 **Cons:**
 - **RHOAI does not officially support or test Ray Serve.** The `RayService` CRD and Serve runtime have not been validated on the product, so adopting this approach may require extended effort to mature it (testing, support gaps, potential KubeRay/ODH integration issues). This is a significant adoption risk.
 - Requires a running `RayService` instead of submitting `RayJob` CRDs — different operational model
-- Cluster resources are held while the service is up (same as Option C)
+- Cluster resources are held while the service is up
 - Subprocess isolation for timeout protection needs adaptation for the async Serve handler
-- Less familiar pattern for data engineering teams used to batch/job submission workflows
+
+**Path to production:** Option B validates the warm-actor pattern today. Ray Serve is the productization of that same pattern — adding HTTP routing, autoscaling, and operational tooling on top. The progression is: Option A (baseline) → Option B (POC) → Option C (production).
 
 ## Comparison
 
-| Concern | Option A (Jobs) | Option B (Data batch=1) | Option C (Data Streaming) | Option D (Serve) |
-|---|---|---|---|---|
-| Docling init | Every job (cold) | Once per actor (warm) | Once per actor (warm) | Once per replica (warm) |
-| Per-doc setup overhead | High (job lifecycle) | High (Ray Data init) | Low (pipeline stays up) | Minimal (~7-10ms) |
-| Built-in autoscaling | No | No | No | Yes |
-| Fault tolerance | Per-job retry | Ray Data error handling | Complex (long-running) | Auto-restart replicas |
-| API | Job submission client | Job submission client | Custom file watcher | HTTP endpoint |
-| Ray's recommendation | Batch orchestration | Offline batch inference | Not a real pattern | **Real-time serving** |
+| Concern | Option A (Jobs) | Option B (Remote Actors) | Option C (Serve) |
+|---|---|---|---|
+| Docling init | Every job (cold) | Once per actor (warm) | Once per replica (warm) |
+| Per-doc overhead | High (job lifecycle + Dashboard API) | Low (task scheduling only) | Minimal (~7-10ms) |
+| Built-in autoscaling | No | No | Yes |
+| Built-in request queuing | No | No | Yes |
+| Fault tolerance | Per-job isolation | Manual (client handles) | Auto-restart replicas |
+| API | Job submission client | `ray.init()` + actor calls | HTTP endpoint |
+| Client requirement | Any (submits via API) | Must hold `ray.init()` connection | Any HTTP client |
+| Works on RHOAI today | Yes | Yes | No (`RayService` not supported) |
+| Ray's recommendation | Batch orchestration | Ad-hoc / development | **Real-time serving** |
 
 ## Next Steps
 
-1. Complete the 50-doc Option A test to quantify overhead breakdown (Docling init vs pip install vs conversion)
-2. Use the timing data to decide whether to proceed with Option D (Ray Serve)
-3. If Ray Serve: build a minimal deployment, deploy via `RayService` CRD, compare latency against Option A
+1. **Option B POC:** Connect directly to the cluster via `ray.init()`, create warm Docling actors, and measure per-document latency without job overhead. Compare against Option A results.
+2. **Validate warm-actor benefit:** Confirm that warm Docling actors eliminate the per-document init overhead seen in Option A (~26s overhead on a 1-page doc).
+3. **Option C exploration:** Once Option B validates the pattern, explore Ray Serve as the production path. Assess `RayService` CRD readiness on RHOAI.
+
+## Appendix: Other Considered Approaches
+
+### Ray Data with `batch_size=1`
+
+Submit a single RayJob using Ray Data with `ActorPoolStrategy` and `batch_size=1`. Actors stay warm, but each job submission still incurs ~140s of Ray Data setup overhead. Ruled out because the setup overhead negates the warm-actor benefit for individual documents.
+
+### Ray Data Streaming
+
+A persistent Ray Data pipeline that watches for new documents. Ray Data is explicitly documented as being for offline batch inference — streaming is not an officially supported pattern. Option B (remote actors) achieves the same warm-actor benefit with a simpler, supported API. Option C (Ray Serve) is the official version of this idea.
