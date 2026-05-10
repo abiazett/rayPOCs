@@ -1,6 +1,6 @@
 # Option A: Per-Document Processing with Ray Jobs on a Persistent RayCluster
 
-For comparison with other approaches (Options B and C), see `real-time-processing-options.md`.
+For comparison with other approaches (Options B and C), see `../real-time-processing-options.md`.
 
 ## Goal
 
@@ -42,7 +42,7 @@ The correct RayCluster configuration for both per-document and batch processing:
 | Head `num-cpus` | `2` | Allows job driver to schedule on head. `0` blocks Ray Data with "No available node types" error |
 | Worker `num-cpus` | `WORKER_CPUS - 2` (e.g. `2`) | Reserves 2 CPUs per worker for Ray system processes (raylet, object store) |
 
-The CodeFlare SDK does not support setting `num-cpus` in `rayStartParams`, so a JSON patch is applied after `cluster.apply()`. See `issues_to_report.md` for details.
+The CodeFlare SDK does not support setting `num-cpus` in `rayStartParams`, so a JSON patch is applied after `cluster.apply()`. See `../issues_to_report.md` for details.
 
 ```python
 patch = [
@@ -258,9 +258,9 @@ Workers         — Running (2/2)
 | `ray_single_doc_process.py` | Single-doc processor with subprocess isolation |
 | `ray-cluster-docling-per-doc.ipynb` | Notebook: submit jobs, monitor, report |
 | `ray_data_process.py` | Batch processor (used for baseline comparison in Step 7b) |
-| `real-time-processing-options.md` | Comparison of all approaches (Options A–C) |
-| `issues_to_report.md` | Issues to report to upstream repos |
+| `../real-time-processing-options.md` | Comparison of all approaches (Options A–C) |
+| `../issues_to_report.md` | Issues to report to upstream repos |
 
 ## Other Approaches
 
-For alternative approaches (Options B and C), see `real-time-processing-options.md`.
+For alternative approaches (Options B and C), see `../real-time-processing-options.md`.

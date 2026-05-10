@@ -20,9 +20,27 @@ overhead. This POC tests alternatives and measures their trade-offs.
 |---|---|---|
 | **A** | One RayJob per document via Job Client | Tested (10 + 50 docs) |
 | **B** | `ray.init()` + remote actors (warm actors) | Recommended for POC, not yet tested |
-| **C** | Ray Serve (HTTP endpoint with warm replicas) | Recommended for production, not yet tested |
+| **C** | Ray Serve (HTTP endpoint with warm replicas) | Local prototype tested |
 
 See `real-time-processing-options.md` for detailed comparison of all three options.
+
+## Directory Structure
+
+```
+real-time-data-processing/
+├── README.md                         # This file
+├── real-time-processing-options.md   # Comparison of all three approaches (A–C)
+├── issues_to_report.md               # Issues found for upstream repos
+├── option-a/                         # Per-Document RayJobs (RHOAI cluster)
+│   ├── ray-cluster-docling-per-doc.ipynb  # Main notebook
+│   ├── ray_single_doc_process.py          # Per-document processor
+│   ├── ray_data_process.py                # Batch processor (baseline comparison)
+│   └── per-doc-processing-design.md       # Design, test results, findings
+└── option-c/                         # Ray Serve (local + cluster)
+    ├── serve_app.py                       # Serve deployment module (portable to RHOAI)
+    ├── run_serve_local.py                 # Local launcher
+    └── serve_client.py                    # Test client with performance reporting
+```
 
 ## Option A Results (Per-Document RayJobs)
 
@@ -35,22 +53,22 @@ See `real-time-processing-options.md` for detailed comparison of all three optio
 | First-doc latency | ~20.9s | ~28.5s |
 
 Key finding: each per-document job incurs significant overhead from cold Docling
-initialization (~26s overhead on a 1-page doc). Option B (warm actors via
-`ray.init()`) is expected to eliminate this. See `per-doc-processing-design.md`
-for full analysis.
+initialization (~26s overhead on a 1-page doc). See
+`option-a/per-doc-processing-design.md` for full analysis.
 
-## Files
+## Option C Results (Ray Serve, Local)
 
-| File | Purpose |
-|---|---|
-| `ray-cluster-docling-per-doc.ipynb` | Main notebook: create cluster, submit per-doc jobs, report |
-| `ray_single_doc_process.py` | Per-document processor with subprocess isolation and timing breakdown |
-| `ray_data_process.py` | Batch processor (used for baseline comparison in Step 7b) |
-| `per-doc-processing-design.md` | Option A design, test results, cluster config, findings |
-| `real-time-processing-options.md` | Comparison of all three approaches (A–C) |
-| `issues_to_report.md` | Issues found for upstream repos (autoscaler, CodeFlare SDK) |
+| Metric | Option C | Option A (10 docs) |
+|---|---|---|
+| Wall clock | 8.7s | 119.6s |
+| Throughput | 0.344 docs/sec | 0.08 docs/sec |
+| First-doc latency | 7.4s | 20.9s |
+| Warm-doc latency | 0.5–0.8s | N/A (cold every job) |
 
-## Cluster Configuration
+Key finding: warm Serve replicas eliminate per-document Docling init entirely.
+After the first request, subsequent documents complete in under 1 second.
+
+## Cluster Configuration (Option A)
 
 | Setting | Value | Reason |
 |---|---|---|
@@ -62,15 +80,48 @@ The notebook applies this configuration automatically via a JSON patch in Step 4
 
 ## Prerequisites
 
+**Option A (RHOAI cluster):**
 - RHOAI with KubeRay operator installed
 - A ReadWriteMany PVC with input PDFs
 - Container image with Ray + Docling (`quay.io/cathaloconnor/docling-ray:latest`)
 - Workbench with `codeflare-sdk` installed
 
-## Quick Start
+**Option C (local):**
+- `ray[serve]`, `docling`, `orjson`, `requests` installed
+
+## Quick Start — Option A (Per-Document RayJobs on RHOAI)
 
 1. Clone this repo in your RHOAI workbench
-2. Open `ray-cluster-docling-per-doc.ipynb`
+2. Open `option-a/ray-cluster-docling-per-doc.ipynb`
 3. Set your credentials in Step 2
 4. Set `NUM_DOCS` in Step 3
 5. Run all cells — the notebook creates the cluster, patches it, submits jobs, and reports results
+
+## Quick Start — Option C (Ray Serve, Local)
+
+```bash
+# Terminal 1: Start the Serve endpoint
+cd real-time-data-processing/option-c
+python run_serve_local.py
+
+# Terminal 2: Test with curl
+curl -X POST http://127.0.0.1:8100/ \
+  -H "Content-Type: application/json" \
+  -d '{"file_path": "/path/to/document.pdf"}'
+
+# Terminal 2: Run the full test client (uses pdfs from feast-raydata-local-poc/)
+python serve_client.py
+
+# Or specify a custom PDF directory
+python serve_client.py /path/to/pdfs --concurrent
+```
+
+Environment variables for `option-c/serve_app.py`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `INPUT_BASE_DIR` | (empty) | Base directory for resolving relative file paths |
+| `OUTPUT_BASE_DIR` | (empty) | Where to write markdown/json output (empty = skip) |
+| `NUM_REPLICAS` | `1` | Number of Serve replicas |
+| `NUM_CPUS` | `2` | CPUs per replica |
+| `WRITE_JSON` | `true` | Whether to export JSON alongside markdown |
